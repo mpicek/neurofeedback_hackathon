@@ -24,6 +24,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.lines import Line2D
+from matplotlib.widgets import Button
 import zmq
 
 # ---------------------------------------------------------------------------
@@ -33,13 +34,13 @@ import zmq
 HOST              = "localhost"
 PORT              = 5555
 
-HISTORY_LEN       = 300    # samples kept for display (30 s at 10 Hz)
-FIT_WINDOW        = 50     # samples used to FIT the projection (most recent ~5 s)
-RAW_DISPLAY_LEN   = 100    # samples shown on raw signal panel
-TRAIL_LEN         = 40     # length of the bright trajectory line
-REPROJECT_EVERY   = 10     # recompute projection every N new samples (~1 s)
-UPDATE_MS         = 150    # plot refresh interval in ms
-MIN_FIT_SAMPLES   = 20     # need at least this many samples before projecting
+HISTORY_LEN         = 300   # samples kept for display (30 s at 10 Hz)
+PER_CLASS_FIT_BUF   = 40    # last N samples kept PER CLASS for fitting
+RAW_DISPLAY_LEN     = 100   # samples shown on raw signal panel
+TRAIL_LEN           = 40    # length of the bright trajectory line
+REPROJECT_EVERY     = 10    # recompute projection every N new samples (~1 s)
+UPDATE_MS           = 150   # plot refresh interval in ms
+MIN_PER_CLASS       = 8     # need at least this many samples per class before LDA
 
 CLASS_COLORS = {
     0:    "#6495ed",   # cornflower blue  — left_hand
@@ -54,11 +55,17 @@ CLASS_NAMES = {0: "left_hand", 1: "right_hand", 2: "left_leg", 3: "right_leg", N
 # ZMQ receiver thread
 # ---------------------------------------------------------------------------
 
-# Each entry: {"data": np.array (n_dims,), "label": int|None, "t": float}
+# Display history — all samples, used for the faded scatter trail
 _buffer  : collections.deque = collections.deque(maxlen=HISTORY_LEN)
+# Per-class fit buffer — last PER_CLASS_FIT_BUF samples per labeled class
+# Used to fit the projection so all 4 classes are always represented
+_fit_buf : dict[int, collections.deque] = {
+    c: collections.deque(maxlen=PER_CLASS_FIT_BUF) for c in range(4)
+}
 _lock    = threading.Lock()
 _meta    : dict = {}
 _running = True
+_proj_mode = "lda"   # "lda" or "pca" — toggled with L / P keys
 
 
 def _receiver_thread():
@@ -72,11 +79,14 @@ def _receiver_thread():
         try:
             msg = json.loads(sock.recv_string())
             with _lock:
-                _buffer.append({
+                entry = {
                     "data":  np.array(msg["data"], dtype=float),
                     "label": msg["label"],
                     "idx":   msg["sample_idx"],
-                })
+                }
+                _buffer.append(entry)
+                if msg["label"] is not None:
+                    _fit_buf[msg["label"]].append(entry)
                 _meta.update({k: msg[k] for k in
                                ("sample_idx", "difficulty", "sample_rate",
                                 "class_scale", "strategy_quality")
@@ -92,47 +102,79 @@ threading.Thread(target=_receiver_thread, daemon=True).start()
 # Stable PCA projection
 # ---------------------------------------------------------------------------
 
-class StableProjection:
+class LDAProjection:
     """
-    Fits PCA axes on the most recent FIT_WINDOW samples only.
-    This means the projection reflects *current* strategy quality — not the
-    full history which may be dominated by earlier bad-strategy periods.
+    Fits a 2-component LDA projection using the per-class fit buffers.
 
-    All history samples are then projected onto these recent axes for display,
-    so you see the full trail but through a lens tuned to current conditions.
+    LDA uses class labels to find the directions that maximally separate
+    classes — unlike PCA which finds directions of maximum total variance
+    and ignores labels entirely.
 
-    Signs are aligned with the previous axes on each refit to prevent flipping.
+    The fit buffer keeps the last PER_CLASS_FIT_BUF samples per class, so
+    all 4 classes are always represented regardless of what the player has
+    been pressing recently.
+
+    Falls back to PCA when fewer than MIN_PER_CLASS samples exist per class.
+    Signs are aligned with previous axes on each refit to prevent flipping.
     """
     def __init__(self):
         self.components: np.ndarray | None = None   # shape (2, n_dims)
         self._mean:      np.ndarray | None = None
         self._since_update = 0
-        self.fit_window_size = 0   # exposed for the title
+        self.method = "waiting"
 
-    def update(self, X_fit: np.ndarray, X_all: np.ndarray) -> np.ndarray:
+    def update(self, fit_buf: dict, X_all: np.ndarray) -> np.ndarray:
         """
-        X_fit: recent samples used to fit axes  (N_fit, n_dims)
-        X_all: all history samples to project   (N_all, n_dims)
-        Returns projected coordinates           (N_all, 2)
+        fit_buf: {class_idx: deque of entries} — per-class sample buffers
+        X_all:   (N, n_dims) — all history for display
+        Returns  (N, 2) projected coordinates
         """
         self._since_update += 1
-        n_fit = len(X_fit)
-        self.fit_window_size = n_fit
-
-        if n_fit < MIN_FIT_SAMPLES:
-            return np.zeros((len(X_all), 2))
+        if len(X_all) == 0:
+            return np.zeros((0, 2))
 
         if self.components is None or self._since_update >= REPROJECT_EVERY:
-            self._refit(X_fit)
+            self._refit(fit_buf)
             self._since_update = 0
+
+        if self.components is None:
+            # Not enough labeled data yet — fall back to PCA on whatever we have
+            self.method = "PCA (warmup)"
+            mean = X_all.mean(axis=0)
+            try:
+                _, _, Vt = np.linalg.svd(X_all - mean, full_matrices=False)
+                return (X_all - mean) @ Vt[:2].T
+            except Exception:
+                return np.zeros((len(X_all), 2))
 
         return (X_all - self._mean) @ self.components.T
 
-    def _refit(self, X: np.ndarray):
-        mean     = X.mean(axis=0)
-        Xc       = X - mean
-        _, _, Vt = np.linalg.svd(Xc, full_matrices=False)
-        new_comp = Vt[:2]
+    def _refit(self, fit_buf: dict):
+        # Collect fit data per class
+        Xs, ys = [], []
+        for cls, buf in fit_buf.items():
+            if len(buf) >= MIN_PER_CLASS:
+                data = np.array([e["data"] for e in buf])
+                Xs.append(data)
+                ys.extend([cls] * len(data))
+
+        if len(Xs) < 2:
+            self.method = "waiting"
+            return   # not enough classes yet
+
+        X  = np.vstack(Xs)
+        y  = np.array(ys)
+        mean = X.mean(axis=0)
+        Xc = X - mean
+
+        try:
+            new_comp = self._lda_components(Xc, y)
+            self.method = "LDA"
+        except Exception:
+            # LDA can fail (singular matrices); fall back to PCA
+            _, _, Vt   = np.linalg.svd(Xc, full_matrices=False)
+            new_comp   = Vt[:2]
+            self.method = "PCA"
 
         if self.components is not None:
             for i in range(2):
@@ -142,8 +184,56 @@ class StableProjection:
         self.components = new_comp
         self._mean      = mean
 
+    @staticmethod
+    def _lda_components(Xc: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """Return top-2 LDA directions (Fisher's linear discriminant)."""
+        classes  = np.unique(y)
+        n_total  = len(Xc)
+        n_dims   = Xc.shape[1]
 
-_proj = StableProjection()
+        # Within-class scatter S_W
+        S_W = np.zeros((n_dims, n_dims))
+        for c in classes:
+            Xc_c = Xc[y == c]
+            diff = Xc_c - Xc_c.mean(axis=0)
+            S_W += diff.T @ diff
+
+        # Between-class scatter S_B
+        grand_mean = Xc.mean(axis=0)
+        S_B = np.zeros((n_dims, n_dims))
+        for c in classes:
+            n_c  = (y == c).sum()
+            mu_c = Xc[y == c].mean(axis=0)
+            diff = (mu_c - grand_mean).reshape(-1, 1)
+            S_B += n_c * (diff @ diff.T)
+
+        # Solve generalised eigenproblem via PCA whitening trick
+        # (avoids inverting the full n_dims × n_dims S_W matrix)
+        # 1. PCA-whiten to reduce to manageable size
+        _, s, Vt     = np.linalg.svd(Xc, full_matrices=False)
+        keep         = min(len(classes) * 4, len(s), n_total - 1)
+        Vt_r         = Vt[:keep]
+        s_r          = s[:keep]
+        W            = Vt_r.T / (s_r + 1e-8)     # whitening matrix
+
+        S_W_w = W.T @ S_W @ W
+        S_B_w = W.T @ S_B @ W
+
+        # Eigenvectors of S_W_w^{-1} S_B_w
+        S_W_w += np.eye(keep) * 1e-6             # regularise
+        evals, evecs = np.linalg.eig(np.linalg.solve(S_W_w, S_B_w))
+        evals        = evals.real
+        evecs        = evecs.real
+        idx          = np.argsort(evals)[::-1]
+        top2         = evecs[:, idx[:2]].T        # (2, keep)
+
+        # Map back to original space
+        components   = top2 @ W.T                 # (2, n_dims)
+        norms        = np.linalg.norm(components, axis=1, keepdims=True)
+        return components / (norms + 1e-12)
+
+
+_proj = LDAProjection()
 
 # ---------------------------------------------------------------------------
 # Fisher separability score
@@ -190,7 +280,49 @@ legend_handles = [
 ax_proj.legend(handles=legend_handles, loc="upper right",
                facecolor="#1e1e2e", edgecolor="#444", labelcolor="#ccc", fontsize=8)
 
-fig.tight_layout(pad=2.5)
+fig.tight_layout(pad=2.5, rect=[0, 0.08, 1, 1])
+
+# ---------------------------------------------------------------------------
+# PCA / LDA toggle button
+# ---------------------------------------------------------------------------
+
+ax_btn = fig.add_axes([0.44, 0.01, 0.12, 0.055])
+ax_btn.set_facecolor("#1e1e2e")
+_btn_toggle = Button(ax_btn, "Mode: LDA", color="#1e1e2e", hovercolor="#2e2e4e")
+_btn_toggle.label.set_color("#cccccc")
+_btn_toggle.label.set_fontsize(10)
+_btn_toggle.label.set_fontweight("bold")
+
+def _on_btn_click(_event):
+    global _proj_mode
+    if _proj_mode == "lda":
+        _proj_mode = "pca"
+        _btn_toggle.label.set_text("Mode: PCA")
+        print("Projection: PCA")
+    else:
+        _proj_mode = "lda"
+        _btn_toggle.label.set_text("Mode: LDA")
+        print("Projection: LDA")
+    fig.canvas.draw_idle()
+
+_btn_toggle.on_clicked(_on_btn_click)
+
+# ---------------------------------------------------------------------------
+# Key handler — L = LDA, P = PCA
+# ---------------------------------------------------------------------------
+
+def _on_key(event):
+    global _proj_mode
+    if event.key in ("l", "L"):
+        _proj_mode = "lda"
+        _btn_toggle.label.set_text("Mode: LDA")
+        print("Projection: LDA")
+    elif event.key in ("p", "P"):
+        _proj_mode = "pca"
+        _btn_toggle.label.set_text("Mode: PCA")
+        print("Projection: PCA")
+
+fig.canvas.mpl_connect("key_press_event", _on_key)
 
 # ---------------------------------------------------------------------------
 # Animation
@@ -199,10 +331,19 @@ fig.tight_layout(pad=2.5)
 _raw_palette = plt.cm.plasma(np.linspace(0.2, 0.9, 8))
 
 def update(_frame):
+    try:
+        _update_inner()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+
+def _update_inner():
     with _lock:
         if len(_buffer) < 2:
             return
-        snapshot = list(_buffer)
+        snapshot     = list(_buffer)
+        fit_buf_snap = {c: list(buf) for c, buf in _fit_buf.items()}
 
     data   = np.array([s["data"]  for s in snapshot])
     labels = np.array([s["label"] if s["label"] is not None else -1
@@ -210,10 +351,16 @@ def update(_frame):
     idxs   = np.array([s["idx"]   for s in snapshot])
     N      = len(snapshot)
 
-    # Fit projection on recent window only; display all history
-    n_fit   = min(FIT_WINDOW, N)
-    X_fit   = data[-n_fit:]
-    coords  = _proj.update(X_fit, data)   # axes from recent, coords for all
+    # Project: LDA mode uses per-class fit buffers; PCA mode uses recent history.
+    if _proj_mode == "lda":
+        coords = _proj.update(fit_buf_snap, data)
+    else:
+        # Plain PCA — recompute on the most recent 100 samples
+        n_fit  = min(100, N)
+        mean   = data[-n_fit:].mean(axis=0)
+        _, _, Vt = np.linalg.svd(data[-n_fit:] - mean, full_matrices=False)
+        coords = (data - mean) @ Vt[:2].T
+        _proj.method = "PCA"
 
     # ----------------------------------------------------------------
     # Left: stable PCA scatter with fade trail
@@ -254,18 +401,19 @@ def update(_frame):
     ax_proj.scatter(coords[-1, 0], coords[-1, 1],
                     c="white", s=70, zorder=5, linewidths=0)
 
-    # Separability score (computed on fit window only — reflects current strategy)
-    fit_labels   = labels[-n_fit:]
-    fit_coords   = coords[-n_fit:]
-    labeled_mask = fit_labels >= 0
-    score = fisher_score(fit_coords[labeled_mask], fit_labels[labeled_mask]) \
+    # Separability score on recent labeled samples (reflects current strategy quality)
+    n_score      = min(100, N)
+    score_labels = labels[-n_score:]
+    score_coords = coords[-n_score:]
+    labeled_mask = score_labels >= 0
+    score = fisher_score(score_coords[labeled_mask], score_labels[labeled_mask]) \
             if labeled_mask.sum() > 8 else 0.0
 
     diff  = _meta.get("difficulty", "?")
     scale = _meta.get("class_scale", None)
     scale_str = f"   signal={scale:.2f}" if scale is not None else ""
     ax_proj.set_title(
-        f"PCA (fit={n_fit} recent)   sep={score:.2f}{scale_str}   [{diff}]",
+        f"{_proj.method}   sep={score:.2f}{scale_str}   [{diff}]",
         color="#aaa", fontsize=10,
     )
     ax_proj.set_xlabel("PC 1", color="#777", fontsize=9)
@@ -303,12 +451,13 @@ def update(_frame):
     ax_raw.set_ylabel("ch offset +3 each", color="#777", fontsize=9)
     ax_raw.tick_params(colors="#888", labelsize=9)
 
-    fig.tight_layout(pad=2.5)
+    fig.tight_layout(pad=2.5, rect=[0, 0.08, 1, 1])
 
 
 ani = animation.FuncAnimation(fig, update, interval=UPDATE_MS, cache_frame_data=False)
 
 print(f"Visualization running.  History: {HISTORY_LEN} samples  |  Refresh: {UPDATE_MS} ms")
+print("Keys (click the plot window first):  L = LDA projection   P = PCA projection")
 print("Close the window to quit.\n")
 
 try:

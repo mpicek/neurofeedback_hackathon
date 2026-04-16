@@ -19,8 +19,8 @@ def main() -> None:
     parser.add_argument(
         "--difficulty", "-d",
         choices=list(DIFFICULTIES.keys()),
-        default="medium",
-        help="Difficulty level  (default: medium)",
+        default="d1",
+        help="Difficulty level  (default: d1)",
     )
     parser.add_argument(
         "--dims", "-n",

@@ -162,17 +162,33 @@ def run_emulator_gui(
         canvas.create_text(rx0+36, 103, text="[0] Rest", font=f_small,
                            fill="#c8c8c8" if cur is None else "#646478", tags="dynamic")
 
-        # -- Strategy pad background --
+        # -- Strategy pad --
         canvas.create_rectangle(PAD, PAD_TOP, PAD+PAD_SIZE, PAD_TOP+PAD_SIZE,
                                  fill="#191928", outline="#373760", width=2, tags="dynamic")
         canvas.create_text(PAD, PAD_TOP - 16, anchor="w",
-                           text="STRATEGY  (arrow keys)", font=f_small, fill="#64648c",
-                           tags="dynamic")
+                           text="STRATEGY  (arrow keys)  — target: (0, 0)",
+                           font=f_small, fill="#64648c", tags="dynamic")
         # crosshair
         canvas.create_line(PAD+10, PCY, PAD+PAD_SIZE-10, PCY, fill="#282840", tags="dynamic")
         canvas.create_line(PCX, PAD_TOP+10, PCX, PAD_TOP+PAD_SIZE-10, fill="#282840", tags="dynamic")
 
-        # trail
+        # Target ring at (0,0)
+        tr = 12
+        canvas.create_oval(PCX-tr, PCY-tr, PCX+tr, PCY+tr,
+                           outline="#3a3a5a", width=2, tags="dynamic")
+
+        # Disturbance arrow (shows what's pushing z_strategy right now)
+        dist = dyn.current_disturbance
+        dist_mag = np.linalg.norm(dist)
+        if dist_mag > 0.001:
+            arrow_scale = HALF * 0.8
+            ex = int(PCX + dist[0] * arrow_scale)
+            ey = int(PCY - dist[1] * arrow_scale)
+            canvas.create_line(PCX, PCY, ex, ey,
+                               fill="#c84040", width=3, arrow="last",
+                               arrowshape=(10, 12, 4), tags="dynamic")
+
+        # Trail
         for i, s in enumerate(strategy_trail):
             frac = (i + 1) / max(len(strategy_trail), 1)
             col  = _rgb(*_lerp_color((30, 50, 100), (100, 160, 255), frac))
@@ -181,7 +197,7 @@ def run_emulator_gui(
             sy   = int(PCY - s[1] * HALF)
             canvas.create_oval(sx-r, sy-r, sx+r, sy+r, fill=col, outline="", tags="dynamic")
 
-        # current dot
+        # Current dot
         sx = int(PCX + zs[0] * HALF)
         sy = int(PCY - zs[1] * HALF)
         canvas.create_oval(sx-9, sy-9, sx+9, sy+9, fill="#5090ff", outline="", tags="dynamic")
@@ -193,46 +209,46 @@ def run_emulator_gui(
         canvas.create_text(STX+8, PAD_TOP-16, anchor="w",
                            text="STATE INFO", font=f_small, fill="#64648c", tags="dynamic")
 
-        # strategy quality label
-        sq_col = _rgb(*_lerp_color((200, 60, 60), (60, 200, 60), sq))
-        canvas.create_text(STX+10, PAD_TOP+16, anchor="w",
-                           text="Strategy quality", font=f_med, fill="#a0a0b4", tags="dynamic")
+        def _bar(label, value, y_off, color):
+            canvas.create_text(STX+10, PAD_TOP+y_off, anchor="w",
+                               text=label, font=f_small, fill="#a0a0b4", tags="dynamic")
+            bx, by = STX+10, PAD_TOP+y_off+18
+            bw = STW - 20
+            canvas.create_rectangle(bx, by, bx+bw, by+12, fill="#2d2d3c",
+                                    outline="", tags="dynamic")
+            fw = max(1, int(bw * np.clip(value, 0, 1)))
+            canvas.create_rectangle(bx, by, bx+fw, by+12, fill=color,
+                                    outline="", tags="dynamic")
+            canvas.create_text(bx + bw + 6, by + 6, anchor="w",
+                               text=f"{value:.2f}", font=f_small, fill=color,
+                               tags="dynamic")
 
-        # quality bar background
-        bar_x0, bar_y0 = STX+10, PAD_TOP+38
-        bar_w = STW - 20
-        canvas.create_rectangle(bar_x0, bar_y0, bar_x0+bar_w, bar_y0+14,
-                                 fill="#2d2d3c", outline="", tags="dynamic")
-        fill_w = max(1, int(bar_w * sq))
-        canvas.create_rectangle(bar_x0, bar_y0, bar_x0+fill_w, bar_y0+14,
-                                 fill=sq_col, outline="", tags="dynamic")
-        canvas.create_text(STX+10, PAD_TOP+60, anchor="w",
-                           text=f"{sq:.2f}", font=f_small, fill=sq_col, tags="dynamic")
+        sq_col = _rgb(*_lerp_color((200, 60, 60), (60, 200, 60), sq))
+        sc     = dyn.class_scale
+        sc_col = _rgb(*_lerp_color((200, 60, 60), (60, 200, 60), sc))
+
+        _bar("Strategy quality  (stay near centre)", sq, 14,  sq_col)
+        _bar("Signal strength   (hold quality)",     sc, 56,  sc_col)
 
         # z values
-        canvas.create_text(STX+10, PAD_TOP+85, anchor="w",
+        canvas.create_text(STX+10, PAD_TOP+102, anchor="w",
                            text=f"z_class  [{zc[0]:+.2f}  {zc[1]:+.2f}  {zc[2]:+.2f}]",
                            font=f_small, fill="#8282a0", tags="dynamic")
-        canvas.create_text(STX+10, PAD_TOP+108, anchor="w",
+        canvas.create_text(STX+10, PAD_TOP+122, anchor="w",
                            text=f"z_strat  [{zs[0]:+.2f}  {zs[1]:+.2f}]",
                            font=f_small, fill="#8282a0", tags="dynamic")
-        canvas.create_text(STX+10, PAD_TOP+130, anchor="w",
+        canvas.create_text(STX+10, PAD_TOP+142, anchor="w",
                            text=f"t = {dyn.t:.1f} s",
                            font=f_small, fill="#646482", tags="dynamic")
 
-        # disturbance indicator
-        if emulator.cfg.disturbance_amplitude > 0:
-            phase = 2 * np.pi * emulator.cfg.disturbance_frequency * dyn.t
-            dval  = np.sin(phase)
-            dcol  = "#dc6432" if abs(dval) > 0.5 else "#5a5a6e"
-            canvas.create_text(STX+10, PAD_TOP+152, anchor="w",
-                               text=f"disturbance  {dval:+.2f}",
-                               font=f_small, fill=dcol, tags="dynamic")
-
-        if emulator.cfg.nonstationarity_amplitude > 0:
-            canvas.create_text(STX+10, PAD_TOP+174, anchor="w",
-                               text="non-stationary  ON",
-                               font=f_small, fill="#c85050", tags="dynamic")
+        # Disturbance magnitude indicator
+        dist_mag = float(np.linalg.norm(dyn.current_disturbance))
+        dcol = "#dc6432" if dist_mag > 0.01 else "#3a3a5a"
+        canvas.create_text(STX+10, PAD_TOP+165, anchor="w",
+                           text=f"disturbance  {'ON' if dist_mag > 0.01 else 'off'}  "
+                                f"({dyn.current_disturbance[0]:+.2f}, "
+                                f"{dyn.current_disturbance[1]:+.2f})",
+                           font=f_small, fill=dcol, tags="dynamic")
 
         # -- Footer --
         fy = PAD_TOP + PAD_SIZE + 16
