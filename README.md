@@ -51,25 +51,17 @@ is held:
 This structure is intentional: **hand vs leg is easy** (large separation on dim 0),
 **left vs right is hard** (small separation on dim 1) — mirroring real clinical data.
 
-### Per-class strategy targets
+### The optimal strategy
 
-Each class has its own hidden optimal strategy position in the 2D strategy space:
+The optimal strategy position is always `(0, 0)` in strategy space — the same for
+every class.
 
-| Class | Optimal strategy position |
-|---|---|
-| left_hand  | `[+0.62, -0.41]` |
-| right_hand | `[-0.55, +0.38]` |
-| left_leg   | `[+0.24, +0.70]` |
-| right_leg  | `[-0.37, -0.63]` |
+Each difficulty level has a **per-class temporal disturbance function** that continuously
+pushes `z_strategy` away from `(0, 0)`.  The operator must learn to counter-balance
+these disturbances with arrow keys to keep `z_strategy` near the origin.
 
-Finding the right strategy for left hand does **not** help with right leg.
-When the operator switches intention (number key), they must also navigate to a
-completely different region of strategy space.  Using the wrong strategy for a class
-suppresses its signal to zero regardless of which projection the students apply.
-
-**z_strategy** is navigated continuously with the arrow keys.  It represents the
-patient's *mental strategy* — how they are thinking about the movement, not just
-what movement they intend.
+Different difficulty levels use different disturbance patterns (pulses, diagonal kicks,
+double-tap rhythms, rotating forces, dual-frequency drives) — see below.
 
 ### Intention vs strategy — why they are separate
 
@@ -77,12 +69,12 @@ This distinction is the core of the simulation:
 
 - **Intention** (number key) = *what* movement the patient is trying to perform.
   This sets the class label attached to each data sample.
-- **Strategy** (arrow keys) = *how* the patient is trying to perform it.
+- **Strategy** (arrow keys) = *how* well the patient is maintaining focus.
   This determines whether the neural signal actually reflects the intention.
 
 In a real session the clinician announces the intention ("now: left hand") — that is
 the label.  Whether the patient's brain signal *looks like* left hand depends entirely
-on the mental strategy they use.  The neurofeedback teaches them to find better
+on the mental strategy they use.  The neurofeedback teaches them to maintain better
 strategies.
 
 Crucially, using the arrow keys to fight disturbances does **not** corrupt the label,
@@ -101,17 +93,14 @@ x = A  @  R(z_strategy)  @  diag(scale)  @  z  +  noise
 
 - **R(z_strategy)** — a strategy-dependent rotation matrix built from three
   [Givens rotations](https://en.wikipedia.org/wiki/Givens_rotation) in planes
-  `(0,5)`, `(1,6)`, `(2,7)`.  When the player is far from the hidden good-strategy
-  position, this rotation mixes the class signal into the noise dimensions.
-  Different strategy positions require different projection directions to see the
-  classes — which is why the students' projection must be *recomputed* continuously
-  as strategy shifts.
+  `(0,5)`, `(1,6)`, `(2,7)`.  When `z_strategy` is far from `(0, 0)`, this rotation
+  mixes the class signal into the noise dimensions, making classes indistinguishable.
+  The projection that recovers the classes must be recomputed as strategy shifts.
 
 - **scale** — suppresses the class signal when strategy is poor.  Implemented as a
-  **leaky integrator** with time constant ~3 s: arriving at the right strategy position
-  is not enough — the signal builds up gradually and requires the strategy to be *held*.
-  Leaving too soon causes decay.  This creates genuine temporal dynamics without a
-  prescribed sequence.
+  **leaky integrator** with time constant ~3 s: arriving at `(0, 0)` is not enough —
+  the signal builds up gradually and requires the strategy to be *held*.
+  Leaving too soon causes decay.
 
 - **noise** — Gaussian observation noise added on top.
 
@@ -122,67 +111,53 @@ co-adaptation.
 
 ### Temporal dynamics of the class signal
 
-`class_scale` is a leaky integrator rather than an instantaneous function:
+`class_scale` is a leaky integrator:
 
 ```
 scale(t+1) = scale(t) + (dt / τ) * (strategy_quality³ - scale(t))
 ```
 
-where τ = 3 seconds.  The consequences:
+where τ = 3 seconds and `strategy_quality = exp(-2.5 * ||z_strategy||)`.
 
-- **Build-up**: arriving at the correct strategy gives ~16% scale after 0.5 s,
+Consequences:
+
+- **Build-up**: arriving at `(0, 0)` gives ~16% scale after 0.5 s,
   ~50% after 2 s, ~82% after 5 s.
-- **Decay**: moving to the wrong position causes scale to fall back toward zero
-  (~58% after 1 s away, ~21% after 4 s away).
-- **Switching classes**: scale resets because the new class has a different target.
-  The operator must navigate to the new target AND hold it before the signal
-  for that class builds up.
-
-This means the challenge is not just *where* to put the arrows but *when* and
-for *how long* — temporal strategy matters.
+- **Decay**: drifting away causes scale to fall back toward zero.
+- **Switching classes**: the disturbance pattern changes immediately, so the operator
+  must learn the new counter-rhythm AND hold it before the signal builds up.
 
 ### Why classes are hard to separate by default
 
-At the default strategy position `(0, 0)` (arrows untouched):
+When `z_strategy` is far from `(0, 0)` (arrows not compensating):
 
-| Metric | Value |
-|---|---|
-| Strategy quality | ~0.16 |
-| Class signal scale | ~0.004 |
-| PCA-2D accuracy | ~28% ≈ chance |
+- `strategy_quality` is near zero → `class_scale` stays near zero
+- The rotation `R(z_strategy)` mixes class signal into noise dims
+- PCA / LDA on the observed signal finds noise, not classes
 
-At the hidden good-strategy position:
+When the operator keeps `z_strategy` near `(0, 0)`:
 
-| Metric | Value |
-|---|---|
-| Strategy quality | 1.00 |
-| Class signal scale | 1.00 |
-| PCA-2D accuracy | ~70% |
+- `class_scale` rises toward 1.0
+- `R(z_strategy) ≈ I` — class signal is preserved
+- Projection methods can clearly separate all four classes
 
-Students must guide the operator (arrow keys) toward that hidden position by watching
-how well their projection separates the labeled classes.
+### Difficulty levels and disturbance patterns
 
-### Disturbances (medium / hard)
+| Level | Disturbance pattern | Description |
+|-------|---------------------|-------------|
+| `d1`  | Cardinal pulses     | 2 Hz on/off pulses, each class pushed in a different cardinal direction (R/U/L/D). Counter: tap the opposing arrow ~2×/s in sync. |
+| `d2`  | Diagonal pulses     | 1.5 Hz pulses at diagonal directions with 2:1 axis ratio. Counter: hold diagonal arrows at the right rhythm. |
+| `d3`  | Double-tap rhythm   | Two 120 ms bursts per second with a 750 ms rest — then repeat. Counter: two quick taps, then release. Holding continuously over-corrects. |
+| `d4`  | Rotating force      | Continuously rotating disturbance (1 full rotation per 2.5 s). Counter: smoothly rotate through arrow combinations. |
+| `d5`  | Dual-frequency      | Independent x and y axes driven at different square-wave frequencies. Counter: tap L/R and U/D independently at their own rhythms. |
 
-The emulator adds structured disturbances to `z_class` every step:
+Noise and signal parameters also increase across levels:
 
-- **Sinusoidal kicks** — three independent oscillations at a fixed frequency,
-  each pushing in a random direction.  The operator must counteract these with
-  continuous arrow input; holding still is not enough.
-- **Random spikes** — sudden large kicks in a random direction.
-- **Non-stationarity (hard only)** — the hidden good-strategy target drifts slowly
-  in a circle over time.  The projection that worked 2 minutes ago stops working;
-  students must detect and adapt to this drift.
-
-### Difficulty levels
-
-| | Easy | Medium | Hard |
-|---|---|---|---|
-| Observation noise std | 0.3 | 0.8 | 1.8 |
-| Latent noise std | 0.03 | 0.12 | 0.28 |
-| Sinusoidal disturbances | off | on | on (stronger) |
-| Random spikes | off | rare | frequent |
-| Non-stationarity | off | off | on |
+| Parameter | d1 | d2 | d3 | d4 | d5 |
+|-----------|----|----|----|----|-----|
+| Observation noise std | 0.35 | 0.50 | 0.65 | 0.85 | 1.10 |
+| Latent noise std | 0.04 | 0.06 | 0.08 | 0.10 | 0.12 |
+| Disturbance amplitude | 0.065 | 0.075 | 0.080 | 0.090 | 0.095 |
 
 ---
 
@@ -194,21 +169,22 @@ Requires Python ≥ 3.10.
 pip install -r requirements.txt
 ```
 
-Dependencies: `numpy`, `pyzmq`, `pygame`.
+Dependencies: `numpy`, `pyzmq`, `pygame`, `matplotlib`, `scipy`.
 
 ---
 
 ## Running the emulator
 
 ```bash
-# default: medium difficulty, 256 dimensions, ZMQ port 5555
+# default: d1 difficulty, 256 dimensions, ZMQ port 5555
 python -m emulator
 
-# easy mode
-python -m emulator --difficulty easy
+# harder levels
+python -m emulator --difficulty d2
+python -m emulator --difficulty d5
 
-# hard mode, 128 dimensions, custom port
-python -m emulator --difficulty hard --dims 128 --port 5556
+# custom dims and port
+python -m emulator --difficulty d3 --dims 128 --port 5556
 ```
 
 ### Controls
@@ -223,29 +199,30 @@ python -m emulator --difficulty hard --dims 128 --port 5556
 | `←` `→` `↑` `↓` | Navigate strategy space (hold for continuous movement) |
 | `ESC` / `Q` | Quit |
 
-The **strategy quality** bar in the GUI shows how close the current arrow position
-is to the hidden good-strategy target.  This is visible to the operator but would
-not be shown to a real patient — it is there so you can verify the emulator is
-behaving correctly.
+The **strategy quality** bar in the GUI shows how close `z_strategy` is to `(0, 0)`.
+This is visible to the operator but would not be shown to a real patient — it is there
+so you can verify the emulator is behaving correctly.
 
 ---
 
 ## Receiving data in your GUI
 
-The emulator publishes one JSON message per sample over a **ZMQ PUB** socket.
+The emulator publishes one JSON message per sample over a **ZMQ PUB** socket at 10 Hz.
 
 ### Message format
 
 ```json
 {
-    "timestamp":   1713000000.123,
-    "sample_idx":  42,
-    "data":        [0.31, -1.22, 0.07, ...],
-    "label":       0,
-    "label_name":  "left_hand",
-    "n_dims":      256,
-    "sample_rate": 10,
-    "difficulty":  "medium"
+    "timestamp":        1713000000.123,
+    "sample_idx":       42,
+    "data":             [0.31, -1.22, 0.07, ...],
+    "label":            0,
+    "label_name":       "left_hand",
+    "n_dims":           256,
+    "sample_rate":      10,
+    "difficulty":       "d1",
+    "class_scale":      0.74,
+    "strategy_quality": 0.92
 }
 ```
 
@@ -253,12 +230,28 @@ The emulator publishes one JSON message per sample over a **ZMQ PUB** socket.
 |---|---|---|
 | `timestamp` | float | Unix time of sample generation |
 | `sample_idx` | int | Monotonically increasing counter |
-| `data` | list[float] | The 256-dim neural signal — this is your input |
+| `data` | list[float] | The 256-dim neural signal — this is your model input |
 | `label` | int \| null | Intended class (0–3) or null for rest |
 | `label_name` | str | `"left_hand"`, `"right_hand"`, `"left_leg"`, `"right_leg"`, `"rest"` |
 | `n_dims` | int | Length of `data` |
 | `sample_rate` | int | Samples per second (10 Hz) |
 | `difficulty` | str | Active difficulty level |
+| `class_scale` | float | Current signal strength 0–1 (leaky-integrated) |
+| `strategy_quality` | float | How close operator is to optimal (0–1) |
+
+### Starter template
+
+`starter_template.py` — a minimal, well-commented receiver that accumulates a sliding
+window of labeled samples and has clearly marked `TODO` sections for plugging in your
+projection and visualisation code.  Start here.
+
+```bash
+# Run emulator in one terminal
+python -m emulator
+
+# Run starter template in another
+python starter_template.py
+```
 
 ### Minimal Python receiver
 
@@ -279,8 +272,6 @@ while True:
     name  = msg["label_name"]          # e.g. "left_hand"
     # your processing here
 ```
-
-A runnable example with console output is in `receiver_example.py`.
 
 ### Receiving from other languages
 
@@ -313,6 +304,16 @@ end
 
 ---
 
+## Provided scripts
+
+| File | Purpose |
+|------|---------|
+| `starter_template.py` | **Start here.** Minimal receiver with TODO placeholders for your model and visualisation. |
+| `receiver_example.py` | Console printer — shows raw numbers arriving from the emulator. Useful for sanity-checking the connection. |
+| `receiver_gui.py` | Reference visualisation — live LDA/PCA scatter + raw signal plot. Shows what a finished GUI might look like; read it for inspiration but build your own. |
+
+---
+
 ## What students should build
 
 The task is to build a GUI that:
@@ -320,12 +321,12 @@ The task is to build a GUI that:
 1. **Receives** the data stream and accumulates a sliding window of labeled samples.
 2. **Computes a projection** (e.g. PCA, LDA, UMAP) from the 256-dim signal to 2D/3D.
 3. **Displays** the projected brain state in real time, coloured by label.
-4. **Recomputes** the projection regularly — as the operator changes strategy, the
+4. **Recomputes** the projection regularly — as the operator's strategy drifts, the
    subspace in which classes are visible rotates, so a static projection will go stale.
-5. **Provides feedback** that helps the operator navigate toward a better strategy:
+5. **Provides feedback** that helps the operator maintain good strategy:
    e.g. a separability score, a confidence bar, or a cursor the operator tries to
-   move to a target region.
+   keep centered.
 
 The key insight students should discover: *there is no single projection that works
-forever*.  The projection and the strategy must co-adapt — exactly what happens in
-real neurofeedback.
+forever*.  As the operator's strategy shifts, the projection must continuously adapt —
+exactly what happens in real neurofeedback co-adaptation.
