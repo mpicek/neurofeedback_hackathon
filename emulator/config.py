@@ -1,17 +1,13 @@
 """
 Difficulty configurations for the Brain Emulator — Version 2.
 
-z_strategy is always attracted back to (0, 0) by a spring force.
-The player must actively hold arrow keys to reach and maintain the optimal corner.
-Difficulty is controlled primarily by spring_rate: a stronger spring decays faster,
-requiring more sustained effort to hold the optimal position.
+z_strategy is always attracted back to (0, 0) at constant speed (not exponential).
+spring_rate is in units/second; at 10 Hz each step pulls by spring_rate * dt.
+strategy_speed must exceed spring_rate * dt for the player to hold any position.
 
-At equilibrium (holding one arrow axis continuously):
-    arrow_speed = spring_rate * z_eq  →  z_eq = strategy_speed / (spring_rate * dt)
-
-With strategy_speed=0.09 and dt=0.1:
-    d1 (spring=1.2): diagonal equilibrium ≈ 0.75   (near corner — easy to hold)
-    d5 (spring=2.8): diagonal equilibrium ≈ 0.32   (far from corner — needs effort)
+With strategy_speed=0.15 and dt=0.1:
+    d1 (spring=0.6): return speed 0.06/step — easy to hold, ~1.5 s to return from corner
+    d5 (spring=1.4): return speed 0.14/step — hard to hold, ~0.65 s to return from corner
 """
 
 from dataclasses import dataclass
@@ -21,9 +17,9 @@ from dataclasses import dataclass
 class DifficultyConfig:
     name: str
 
-    # Spring rate: z_strategy decays as exp(-spring_rate * dt) each step.
-    # Higher → stronger pull to center → harder to hold optimal corner.
-    spring_rate: float = 1.5
+    # Spring rate: z_strategy moves toward (0,0) at spring_rate units/second.
+    # Higher → faster return to center → harder to hold optimal corner.
+    spring_rate: float = 1.0
 
     # Observation noise (added to final 256-dim signal)
     gaussian_noise_std: float = 0.5
@@ -35,7 +31,7 @@ class DifficultyConfig:
     class_pull_strength: float = 0.28
 
     # How fast arrow keys move z_strategy
-    strategy_speed: float = 0.09
+    strategy_speed: float = 0.15
 
     # How steeply rotation reacts to z_strategy deviation from optimal
     strategy_sensitivity: float = 2.0
@@ -50,47 +46,47 @@ class DifficultyConfig:
 DIFFICULTIES: dict[str, DifficultyConfig] = {
     "d1": DifficultyConfig(
         name="d1",
-        spring_rate=0.8,
+        spring_rate=0.6,
         gaussian_noise_std=0.35,
         latent_noise_std=0.04,
         class_pull_strength=0.30,
-        strategy_speed=0.09,
+        strategy_speed=0.15,
         strategy_sensitivity=1.8,
     ),
     "d2": DifficultyConfig(
         name="d2",
-        spring_rate=1.2,
+        spring_rate=0.8,
         gaussian_noise_std=0.50,
         latent_noise_std=0.06,
         class_pull_strength=0.26,
-        strategy_speed=0.09,
+        strategy_speed=0.15,
         strategy_sensitivity=2.0,
     ),
     "d3": DifficultyConfig(
         name="d3",
-        spring_rate=1.5,
+        spring_rate=1.0,
         gaussian_noise_std=0.65,
         latent_noise_std=0.08,
         class_pull_strength=0.24,
-        strategy_speed=0.09,
+        strategy_speed=0.15,
         strategy_sensitivity=2.2,
     ),
     "d4": DifficultyConfig(
         name="d4",
-        spring_rate=1.8,
+        spring_rate=1.2,
         gaussian_noise_std=0.85,
         latent_noise_std=0.10,
         class_pull_strength=0.22,
-        strategy_speed=0.09,
+        strategy_speed=0.15,
         strategy_sensitivity=2.5,
     ),
     "d5": DifficultyConfig(
         name="d5",
-        spring_rate=2.0,
+        spring_rate=1.4,
         gaussian_noise_std=1.10,
         latent_noise_std=0.12,
         class_pull_strength=0.20,
-        strategy_speed=0.09,
+        strategy_speed=0.15,
         strategy_sensitivity=2.8,
     ),
 }

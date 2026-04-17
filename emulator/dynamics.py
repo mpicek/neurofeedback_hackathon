@@ -25,19 +25,19 @@ Per-class optimal strategies
   Each optimal position is paired with a specific z_class centroid target.
 
   class 0 (left_hand)  — 2 strategies:
-      primary  (+0.25, +0.25)  →  [+2.0, +1.5,  0.0]  separable from class 1
-      merge    (+0.25, -0.25)  →  [  0,    0,    0  ]  same centroid as class 3 merge
+      primary  (+0.65, +0.65)  →  [+2.0, +1.5,  0.0]  separable from class 1
+      merge    (+0.65, -0.65)  →  [  0,    0,    0  ]  same centroid as class 3 merge
 
   class 1 (right_hand) — 1 strategy:
-      primary  (-0.25, +0.25)  →  [+2.0, -1.5,  0.0]  separable from class 0
+      primary  (-0.65, +0.65)  →  [+2.0, -1.5,  0.0]  separable from class 0
 
   class 2 (left_leg)   — 1 strategy:
-      primary  (-0.25, -0.25)  →  [-2.0,  0.0, +1.5]  separable from class 3
+      primary  (-0.65, -0.65)  →  [-2.0,  0.0, +1.5]  separable from class 3
 
   class 3 (right_leg)  — 3 strategies:
-      primary  (-0.20, -0.20)  →  [-2.0,  0.0, -1.5]  separable from class 2
-      merge    (-0.25, +0.25)  →  [  0,    0,    0  ]  same centroid as class 0 merge
-      alt      (+0.20,  0.00)  →  [-2.0,  0.0, -1.5]  separable from class 2 (alt path)
+      primary  (-0.52, -0.52)  →  [-2.0,  0.0, -1.5]  separable from class 2
+      merge    (-0.65, +0.65)  →  [  0,    0,    0  ]  same centroid as class 0 merge
+      alt      (+0.52,  0.00)  →  [-2.0,  0.0, -1.5]  separable from class 2 (alt path)
 
 Merge mechanic
 --------------
@@ -63,19 +63,19 @@ from .config import DifficultyConfig
 # ---------------------------------------------------------------------------
 OPTIMAL_STRATEGIES: dict[int, np.ndarray] = {
     0: np.array([
-        [+0.25, +0.25],   # primary: class 0 separable from class 1
-        [+0.25, -0.25],   # merge:   class 0 looks same as class 3 merge
+        [+0.65, +0.65],   # primary: class 0 separable from class 1
+        [+0.65, -0.65],   # merge:   class 0 looks same as class 3 merge
     ]),
     1: np.array([
-        [-0.25, +0.25],   # primary: class 1 separable from class 0
+        [-0.65, +0.65],   # primary: class 1 separable from class 0
     ]),
     2: np.array([
-        [-0.25, -0.25],   # primary: class 2 separable from class 3
+        [-0.65, -0.65],   # primary: class 2 separable from class 3
     ]),
     3: np.array([
-        [-0.20, -0.20],   # primary: class 3 separable from class 2
-        [-0.25, +0.25],   # merge:   class 3 looks same as class 0 merge
-        [+0.20,  0.00],   # alt:     class 3 separable from class 2 (alternate path)
+        [-0.52, -0.52],   # primary: class 3 separable from class 2
+        [-0.65, +0.65],   # merge:   class 3 looks same as class 0 merge
+        [+0.52,  0.00],   # alt:     class 3 separable from class 2 (alternate path)
     ]),
 }
 
@@ -169,6 +169,7 @@ class LatentDynamics:
 
     def set_class(self, class_idx: int | None) -> None:
         self.current_class = class_idx
+        self.z_strategy = np.zeros(N_STRATEGY_DIMS)
 
     def update_strategy(self, delta: np.ndarray) -> None:
         """Move z_strategy by delta (arrow keys). Clamped to [-1, 1]²."""
@@ -204,9 +205,11 @@ class LatentDynamics:
             self._nearest_strategy_idx = 0
             self.z_class *= 1.0 - cfg.class_pull_strength * 0.4
 
-        # 2. Spring: z_strategy decays toward (0, 0) every step.
-        decay = np.exp(-cfg.spring_rate * self.dt)
-        self.z_strategy = self.z_strategy * decay
+        # 2. Spring: z_strategy moves toward (0, 0) at constant speed each step.
+        norm = np.linalg.norm(self.z_strategy)
+        if norm > 0:
+            step = cfg.spring_rate * self.dt
+            self.z_strategy = self.z_strategy * max(0.0, 1.0 - step / norm)
 
         # 3. Latent Gaussian noise on z_class
         self.z_class += self._noise_rng.normal(0, cfg.latent_noise_std, N_CLASS_DIMS)
