@@ -15,6 +15,7 @@ Then in a separate terminal:
     python receiver_gui.py
 """
 
+import argparse
 import json
 import threading
 import collections
@@ -50,6 +51,18 @@ CLASS_COLORS = {
     None: "#787878",
 }
 CLASS_NAMES = {0: "left_hand", 1: "right_hand", 2: "left_leg", 3: "right_leg", None: "rest"}
+
+# ---------------------------------------------------------------------------
+# CLI arguments
+# ---------------------------------------------------------------------------
+
+_parser = argparse.ArgumentParser(description="Brain Emulator receiver GUI")
+_parser.add_argument(
+    "--local-keys", action="store_true",
+    help="Only capture keys when the plot window has focus (legacy behaviour). "
+         "By default keys are captured globally so the window does not need focus."
+)
+_args = _parser.parse_args()
 
 # ---------------------------------------------------------------------------
 # ZMQ receiver thread
@@ -311,18 +324,50 @@ _btn_toggle.on_clicked(_on_btn_click)
 # Key handler — L = LDA, P = PCA
 # ---------------------------------------------------------------------------
 
-def _on_key(event):
+def _handle_key(char: str):
+    """Core key logic — called from either the matplotlib or the global listener."""
     global _proj_mode
-    if event.key in ("l", "L"):
+    k = char.lower()
+    if k == "l":
         _proj_mode = "lda"
         _btn_toggle.label.set_text("Mode: LDA")
         print("Projection: LDA")
-    elif event.key in ("p", "P"):
+    elif k == "p":
         _proj_mode = "pca"
         _btn_toggle.label.set_text("Mode: PCA")
         print("Projection: PCA")
 
-fig.canvas.mpl_connect("key_press_event", _on_key)
+_global_listener = None
+
+if _args.local_keys:
+    # Legacy: only react to keys when the matplotlib window has focus.
+    def _on_key(event):
+        if event.key:
+            _handle_key(event.key)
+    fig.canvas.mpl_connect("key_press_event", _on_key)
+    print("Key mode: local  (window must have focus for L / P to work)")
+else:
+    # Default: capture keys system-wide via pynput so the window
+    # does not need focus.
+    try:
+        from pynput import keyboard as _kb
+
+        def _on_global_press(key):
+            try:
+                _handle_key(key.char)
+            except AttributeError:
+                pass  # special keys (arrows, shift, …) — ignore
+
+        _global_listener = _kb.Listener(on_press=_on_global_press, daemon=True)
+        _global_listener.start()
+        print("Key mode: global (L / P work even when the window is not focused)")
+    except ImportError:
+        print("Warning: pynput not installed — falling back to local key mode.")
+        print("  Install with:  pip install pynput")
+        def _on_key(event):
+            if event.key:
+                _handle_key(event.key)
+        fig.canvas.mpl_connect("key_press_event", _on_key)
 
 # ---------------------------------------------------------------------------
 # Animation
@@ -457,10 +502,12 @@ def _update_inner():
 ani = animation.FuncAnimation(fig, update, interval=UPDATE_MS, cache_frame_data=False)
 
 print(f"Visualization running.  History: {HISTORY_LEN} samples  |  Refresh: {UPDATE_MS} ms")
-print("Keys (click the plot window first):  L = LDA projection   P = PCA projection")
+print("Keys:  L = LDA projection   P = PCA projection")
 print("Close the window to quit.\n")
 
 try:
     plt.show()
 finally:
     _running = False
+    if _global_listener is not None:
+        _global_listener.stop()
